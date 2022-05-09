@@ -1,0 +1,490 @@
+---
+title: "Colorado Car Accident Prediction: An Analysis of When and Where an Accident May Occur"
+author: "Parker Gauthier"
+date: "4/17/2022"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+  header-includes:
+    - \usepackage{placeins}
+---
+
+## Abstract
+Automobile accidents are of key concern to many policymakers throughout the country. They should be minimized when possible to prevent substantial economic and social harm.  Furthermore, predicting severity can help allocate resources when responding to car accidents. Focused on the state of Colorado, the goal of the following study was to build models predicting the number of car accidents in an area along with the severity of an individual accident.  Using data gathered from the Colorado Department of Transportation, this study takes information of over 120,000 auto accidents that took place in the year 2019.  This was then used to try and predict, given certain factors, how many accidents will result in injury. The model used in making these predictions was a binomial logistic model using Lasso regularization.  With an approximately 79% success rate, this model was marginally better at predicting injury than a model that chose to only predict no injury (approximately 77% of accidents in our test resulted in no injury).  Despite this, the coefficients extracted from the model show intuitive factors that can cause injury. In addition to this, another data set was used, gathered from a public data set on Kaggle.com, containing accident counts and different weather conditions for the day.  This set was used in conjunction to the other to build a Gradient Boosted Forests model aimed at predicting the number of accidents per 100,000 people for a particular day in specific counties.  This model was able to predict with decent accuracy the number of out-of-sample accidents that would happen in a day given particular weather factors.
+```
+```
+```{r include = FALSE}
+#Appropriate packages
+if (!("librarian" %in% rownames(utils::installed.packages()))) {
+  utils::install.packages("librarian")
+}
+librarian::shelf(
+    cran_repo = "https://cran.microsoft.com/",
+    ask = FALSE,
+    here,
+    tidyverse,
+    stargazer,
+    mosaic,
+    dplyr,
+    ggcorrplot,
+    kableExtra,
+    lmtest,
+    Metrics,
+    ggthemes,
+    foreach,
+    plotly,
+    factoextra,
+    lubridate,
+    randomForest,
+    pdp,
+    ggmaps,
+    glmnet,
+    lmtest,
+    caret,
+    foreach,
+    parallel,
+    modelr,
+    ggthemes,
+    gapminder,
+    rsample,
+    rpart,
+    rpart.plot,
+    mice,
+    nnet,
+    gbm,
+    broom,
+    tinytex
+  )
+here::i_am("code/build.Rmd")
+```
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+moosavi = read.csv(here("data/Moosavi_CO_2019.csv"))
+co_listings= read.csv(here("data/Crash_listing_2019.csv"))
+county_pop = read.csv(here("data/Population_by_County.csv"))
+set.seed(55555)
+```
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+#cleaning co_listings
+accidents = co_listings %>% 
+  select(-mp, -agencyname, -location, -ramp, -region, # Dropping redundant and unneeded variables
+         -event_1, -event_2, -event_3, -acctype, -dir_1, 
+         -state_1, -dir_2, -dir_3, -wan_type, -link, -loc_02, 
+         -violcode_1, -violcode_2, -violcode_3, -drvinj_1, 
+         -drvinj_2, -drvinj_3, -driver_1, -driver_2, -driver_3, 
+         -injlevel_1, -injlevel_2,-injlevel_3,-injlevel_4,
+         -injlevel_5,-hazmat_1,-hazmat_2,-hazmat_3, -cycprot_1,
+         -cycprot_2,-cycprot_3,-rte,-sec, -state_1, -state_2, 
+         -state_3, -factor_2, -factor_3, -veh_move_1,-veh_move_2,
+         -veh_move_3) %>% 
+  mutate(severity = ifelse(severity == "FAT" | severity == "INJ",1,0)) %>% # Making a dummy for severity 0-no injury, 1-injury or fatality
+  mutate(speed_limit = limit1) %>% #Creating a speed limit variable
+  mutate(speed_limit = ifelse(limit1 == "UK", limit2, speed_limit)) %>% 
+  mutate(speed_limit = ifelse(speed_limit == "UK", limit3, speed_limit)) %>% 
+  mutate(impairment = ifelse(dui_1 == "Y" | dui_2 == "Y" | dui_3 == "Y", 1, 0)) %>% # Dummy for impairment 
+  mutate(no_seatbelt = ifelse(belt_1 == "N" | belt_2 == "N" | belt_3 == "N", 1, 0)) %>% # Dummy for seat belts
+  mutate(speed = ifelse(speed_1 >= speed_2 & speed_1 != "UK", speed_1, speed_2)) %>% # Maximum speed for drivers involved
+  mutate(speed = ifelse(speed_3 >= speed & speed_3 != "UK", speed_3, speed)) %>% 
+  mutate(teen_driver = ifelse(age_1 < 20 & age_1 != 0, 1, 0)) %>% #Dummy for teen driver
+  mutate(teen_driver = ifelse(age_2 < 20 & age_2 != 0, 1, teen_driver)) %>% 
+  mutate(teen_driver = ifelse(age_3 < 20 & age_3 != 0, 1, teen_driver)) %>% 
+  mutate(motorcycle = ifelse(vehicle_1 == "MOTORCYCLE" | vehicle_2 == "MOTORCYCLE" | vehicle_3 == "MOTORCYCLE",1,0)) %>% #Dummy for motorcycle involvement
+  select(-dui_1,-dui_2,-dui_3,-limit1,-limit2,-limit3, -belt_1, -belt_2, -belt_3,-age_3,-age_2,-age_1,-speed_1,-speed_2,-speed_3,-vehicle_1,-vehicle_2,-vehicle_3) #dropping variables used in creating new fields
+
+
+
+#Filling blank spaces and unknowns with NA
+accidents[accidents == ""] = NA
+accidents[accidents == "UK"] = NA
+accidents[accidents == "UNKNOWN"] = NA
+
+#lubridating
+accidents$date = mdy(accidents$date)
+accidents$time = substr(as.POSIXct(sprintf("%04.0f",accidents$time), format = "%H%M"),12,16)
+accidents$time = hm(accidents$time)
+
+accidents$month = months(accidents$date)
+accidents$weekday = weekdays(accidents$date)
+accidents$hour = hour(accidents$time)
+
+accidents = accidents %>% 
+  mutate(weekday = factor(weekday, levels = c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"))) %>% 
+  mutate(month = factor(month, levels = c("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"))) %>% 
+  mutate(season = ifelse(month == "February" | month == "December" | month == "January", "Winter", 0)) %>% 
+  mutate(season = ifelse(month == "May" | month == "March" | month == "April", "Spring", season)) %>% 
+  mutate(season = ifelse(month == "August" | month == "June" | month == "July", "Summer", season)) %>% 
+  mutate(season = ifelse(month == "November" | month == "September" | month == "October", "Fall", season))
+
+#factorizing
+accidents$severity = as.factor(accidents$severity)
+accidents$impairment = as.factor(accidents$impairment)
+accidents$no_seatbelt = as.factor(accidents$no_seatbelt)
+accidents$system = as.factor(accidents$system)
+accidents$road_desc = as.factor(accidents$road_desc)
+accidents$contour = as.factor(accidents$contour)
+accidents$lighting = as.factor(accidents$lighting)
+accidents$weather = as.factor(accidents$weather)
+accidents$mhe = as.factor(accidents$mhe)
+accidents$factor_1 = as.factor(accidents$factor_1)
+```
+
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+states = map_data("state")
+colorado = subset(states, region == "colorado")
+
+
+map = ggplot(colorado, aes(x = long, y = lat, group = group)) +
+  geom_polygon(color = "black", fill = "black") +
+  theme_map() +
+  geom_point(data = moosavi, mapping = aes(x = Start_Lng, y = Start_Lat, group = NA, alpha = .01), colour = "#ccff99") +
+  guides(alpha = FALSE) +
+  labs(title = "Figure 1 - Car Accidents in Colorado (2016-2021)")
+  
+map
+```
+
+## Introduction
+
+The plot above shows us a sample of 25,340 automobile accidents that have occurred in the state of Colorado.  At this level, we can see city centers outlined by highways and interstates where traffic is dense and car accidents are common.  Behind each of these accidents are costs ranging from minor property damage to the unfortunate loss of life. The essence of the following analysis will be to determine factors that may have contributed to these accidents and their severity, as well as gauge where and when accidents will occur given certain circumstances. The variables of interest will include weather conditions, location, time of day, and roadway characteristics.  By looking at these relationships the hope is to give resources to policy makers and first-responders.  If severity can be predicted by characteristics, particularly those that can be reported on a 911 call, EMTs may be able to better gauge the situation they are heading into.  Furthermore, if the number of accidents can be predicted given certain weather conditions and times of the year, policymakers may be able to allocate funds appropriately to areas that may need the most relief.  If predictions like these are accurate, it could potentially guide policy in a way that improves safety for Colorado drivers.
+
+## Methods and Data
+
+  There are three data sets used in conjunction for this study. The first comes from the Colorado Department of Transportation.  This data is a record of automobile accidents in the state of Colorado for the year 2019.  It includes over 120,000 events with several variables of interest.  Dates and times are reported as well as location information providing names of the counties and streets the events took place.  Furthermore, there are several variables describing road conditions leading up to an event.  These include road type (highway/interstate/city street/urban/rural), weather statuses (Icy/Dry/Wet), proximity to intersections, speed limits (mph), road lighting (Daylight/Dark-unlighted, Dark-lighted), and road contour (Level vs Hilltop).  There are also features describing driver traits such as age (coded 1 for teen, 0 for adult), speed at time of accident (mph), inebriation status (coded 1 for intoxicated, 0 if not), driver behavior prior to the accident (i.e. asleep at the wheel, weaving, changing lanes), and what type of vehicle they were driving (coded 1 for motorcycle, 0 if not).  Two other key variable of interest will be the severity of the accident (coded 0 for no injury and 1 for injury/fatality) and the most harmful event (head-on collision, running into a deer, etc).
+```
+```
+  This data was used to build a binomial logistic regression model using Lasso regularization.  This specification was used to predict whether an accident would be classified as non-severe (no injury) or severe (injury or fatality). Lasso regularization was employed to quickly select the features to be used in the regression as there are many in the data used.  The outcome variable was regressed on several factors. These included the type of road the accident occurred on (county road vs state highway), the number of vehicles involved in the accident, the condition of the roadway(dry vs icy vs wet), the most harmful event (head-on collision, sideswipe, tree, etc), the speed limit in the area, the speed of the fastest car involved, and driver characteristics(teen, driving motorcycle, impairment status, and if they were wearing a seat belt).  This model was trained on 80% of the data using cross validation and then was tested on the remaining 20%.  A confusion matrix was then constructed to determine the out-of-sample accuracy. This number was then compared to a model that predicted no-injury for all accidents as a baseline.
+```
+```
+  Our other data set comes from real-time traffic information collected by researchers  Sobhan Moosavi, Mohammad Hossein Samavatican, Srinivasan Parthasarathy, and Rajiv Ramnath.  This information was collected by scraping multiple APIs that provide live information on new traffic incidents in the United States.  The researchers have made this data publicly available on Kaggle.com to aid the research community in traffic accident analysis. The data set contains nearly three million observations of traffic accidents in the United States between the years 2016-2021. This information includes similar metrics as the previous; however, this data set has latitudinal and longitudinal coordinates as well as more detailed weather information associated with each observation.  For this reason, certain visualizations were constructed using this data set and it was helpful in aggregating county-level weather data.  Due to its large file size the csv was filtered separately for instances that occurred in Colorado then saved into a new file.
+```
+```
+To aggregate county level data, first counts of accidents were taken from the first data set grouped by date and county.  This number was then divided by the total population in each county  (given by Colorado's Information Marketplace; the third data set) and multiplied by 100,000 to get a population adjusted rate of accidents.  Then, using the Kaggle data set, averages of temperatures, wind speeds, precipitation, and visibility were taken for particular dates in different counties.  From here, a gradient boosted trees model was constructed.  The interaction depth was chosen to be 10 and the optimal number of trees used was selected through cross validation of 10 folds.  This model was trained on 80% of the county level data and then was tested on the remaining 20%.  Then, the root mean squared error was taken from the models prediction on the out-of-sample outcomes that were in the testing set.
+
+
+## Results
+### Predicting Severity using Lasso Regression
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+#prepping for severity regression analysis
+harm = accidents %>% 
+  select(-date, -time, -city, -latitude, -longitude, -loc_01, -road_desc, -county, -month, -season, -weather, -contour, -lighting, -rucode, -weekday, -hour) %>% 
+  na.omit()
+```
+
+
+```{r message=FALSE, warning=FALSE, echo=FALSE, include=FALSE}
+#creating training and testing sets then doing feature engineering to ensure factor levels are same for train and test splits
+harm_split = initial_split(harm, .8)
+harm_train = training(harm_split)
+harm_test = testing(harm_split)
+
+cols = names(harm)
+cols = cols[c(-3,-7,-10)]
+ncols = length(cols)
+
+foreach(i = 1:ncols) %do% {
+  col = cols[i]
+  
+  harm_test[,col] = as.character(harm_test[,col])
+  harm_train[,col] = as.character(harm_train[,col])
+  
+  harm_test$isTest = rep(1, nrow(harm_test))
+  harm_train$isTest = rep(0, nrow(harm_train))
+  
+  all_data = rbind(harm_test, harm_train)
+  
+  all_data[,col] = as.factor(all_data[,col])
+}
+
+harm_test = all_data[all_data$isTest == 1,]
+harm_train = all_data[all_data$isTest ==0,]
+
+harm_test = harm_test %>% 
+  select(-isTest)
+harm_train = harm_train %>% 
+  select(-isTest)
+```
+
+
+```{r message=FALSE, warning=FALSE, echo=FALSE, include = FALSE}
+#building a binomial logistic model using lasso regularization
+
+#model matrix
+harm_x = model.matrix(severity ~.-1, data = harm_train)
+harm_y = harm_train$severity
+
+#test matrix
+harm_x_test = model.matrix(severity~.-1, data = harm_test)
+
+#finding different columns
+names_test = colnames(harm_x_test)
+names_train = colnames(harm_x)
+names_diff = setdiff(names_train, names_test)
+iterations = length(names_diff)
+
+df = as.data.frame(harm_x_test)
+
+#adding columns of 0s to test matrix that are in train matrix
+foreach(i = 1:iterations) %do% {
+  col = names_diff[i]
+  
+  df[,col] = rep(0,nrow(df))
+}
+
+harm_x_test = as.matrix(df)
+
+names_test = colnames(harm_x_test)
+names_train = colnames(harm_x)
+names_diff = setdiff(names_test, names_train)
+iterations = length(names_diff)
+
+df = as.data.frame(harm_x)
+
+foreach(i = 1:iterations) %do% {
+  col = names_diff[i]
+  
+  df[,col] = rep(0,nrow(df))
+}
+
+harm_x = as.matrix(df)
+
+#finding best lambda
+ml = cv.glmnet(harm_x, harm_y, alpha =1, family = "binomial", nfolds = 10)
+
+best_lambda = ml$lambda.min
+
+# Running optimal lasso
+harm_lasso = glmnet(harm_x, harm_y, lambda = best_lambda, family = "binomial")
+
+pred = predict(harm_lasso, s = best_lambda, newx = harm_x_test)
+
+yhat = ifelse(pred > 0, 1, 0)
+```
+
+Below displays the results for classifying severity using our regularized binomial logistic model.  The ROC curve displayed in Figure 2 shows the relationship between the true positive rate and false positive rate when changing the threshold of how we classify injury based on our regression predictions.  We can see that it moves almost linearly, contrasting an ideal ROC curve that bows out to the upper left.  Since the scale of the axes are so small, our model does not seem to be predicting many injuries for any threshold value.  For this reason, our threshold is set at a very low number (nearly 0) to coerce predictions for injury into our confusion matrix (table 1). With this threshold we had a TPR of only 6% and a FPR of 1%.
+```
+```
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+TPR_t = foreach(i = 1:100, .combine = 'c') %do% {
+  yhat_loop = ifelse(pred > (i/100), 1, 0)
+  confusion_loop = table(Actual = harm_test$severity, Predictions = yhat_loop)
+  confusion_loop[2,2]/(confusion_loop[2,1] + confusion_loop[2,2])
+}
+
+FPR_t = foreach(i = 1:100, .combine = 'c') %do% {
+  yhat_loop = ifelse(pred > (i/100), 1, 0)
+  confusion_loop = table(Actual = harm_test$severity, Predictions = yhat_loop)
+  confusion_loop[1,2]/(confusion_loop[1,2] + confusion_loop[1,1])
+}
+
+ROC_data = data.frame(TPR_t,FPR_t)
+
+ROC = ROC_data %>%
+  ggplot(aes(x = FPR_t, y = TPR_t,)) +
+  geom_line(color = "red") +
+  labs(x = "FPR",
+       y = "TPR",
+       title = "Figure 2 - ROC Curve") +
+  theme_economist_white()
+
+ROC + geom_abline(intercept = 0, slope = 1)
+```
+```
+```
+\FloatBarrier
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+#confusion matrix
+results = table(Actual = harm_test$severity, Predictions = yhat)
+
+results1 = as.data.frame(table(Actual = harm_test$severity, Predictions = yhat))
+
+predicted0 = results1[1:2,3]
+predicted1 = results1[3:4,3]
+
+con_matrix = rbind(predicted0,predicted1)
+
+con_frame = as.data.frame(con_matrix) %>% 
+  t()
+
+colnames(con_frame) = c("Predicted No Injury", "Predicted Injury")
+
+row.names(con_frame) = c("Actual No Injury", "Actual Injury")
+
+con_frame %>% kable(caption = "Confusion Matrix", format.args = list(float = FALSE)) %>% 
+  kable_styling(c("bordered","condensed"),
+                latex_options = c("hold_position"))
+```
+\FloatBarrier
+
+```{r message=FALSE, warning=FALSE, echo=FALSE, include=FALSE}
+#Accuracy
+round(sum(diag(results))/sum(results) * 100, 3)
+
+results[1,2]/(results[1,2] + results[1,1])
+```
+```
+```
+Despite our low TPR, it is interesting to note some of the coefficients that had high positive values from our regression.  Many of the top coefficients were associated with speed variables. Unsurprisingly, high speeds had higher rankings in our model. Outside of these, Table 2 shows some of the coefficients that had high positive impact on the classification of injury/fatality.   Anything with "mhe" as a prefix means this was the "most harmful event" in the accident. We can see that bicycle, pedestrian, and head-on collisions are ranked highly, as well as incidences where the vehicle overturned.  Additionally, the term "vehicles" signifies the number of vehicles involved in an accident.  Its ranking shows that with more vehicles involved, injury risk is higher.  The table also shows that if a motorcycle was involved in an accident, or if a driver was inebriated, the risk of injury was higher.  Finally, the driver factor of "illness" ranked higher than any other factor of this kind.
+```
+```
+\FloatBarrier
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+coef_tidy = broom::tidy(harm_lasso)
+
+coef_tidy = as.data.frame(coef_tidy)
+
+coef_tidy %>% 
+  select(term, estimate) %>% 
+  filter(term == "mhePEDESTRIAN" | term == "mheBICYCLE" | term == "motorcycle1"| term == "impairment1" | term == "factor_1ILLNESS" | term == "vehicles" | term == "mheOVERTURNING" | term == "mheHEAD-ON") %>% 
+  arrange(desc(estimate)) %>% 
+  kable(caption = "Notable Coefficients", format.args = list(float = FALSE)) %>% 
+  kable_styling(c("bordered","condensed"),
+                latex_options = c("hold_position"))
+```
+\FloatBarrier
+### Accident Count Predictions using Gradient Boosted Forests
+Our next model aims to predict the counts of motor vehicle accidents in each county given different weather conditions.  Also included in the model are variables for day of the week and the season.  Figure 3 depicts that weekdays have far more accidents than weekends, Friday being the day with the most accidents.  Moreover, Fall appears to have more accidents than any other season:
+```
+```
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+# Showing times of day when accidents happened
+accidents %>% 
+  group_by(weekday, season) %>% 
+  summarise(count = n()) %>% 
+  ggplot(mapping = aes(x = weekday, y = count, fill = weekday)) +
+  geom_col(colour = "black") +
+  facet_wrap(~season, nrow = 1) +
+  labs(x = "Weekday", y = "Number of Accidents", title = "Figure 3 - Daily Accidents by Weekday") +
+  theme_clean() +
+  theme(axis.text.x = element_text(angle = 90), legend.position = "none") 
+```
+```
+```
+When controlling for the above factors in our model, our out-of-sample performance reported an rmse of approximately 1.481.  To give context Table-3 shows the summary statistics for accident rates in Colorado by county.  For many counties in our data set, this is within one standard deviation from the mean.
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+#random forest setup for counts
+
+#getting weather information from moosavi dataset
+
+#making date variable
+moosavi$Start_Time = ymd_hms(moosavi$Start_Time)
+moosavi$date = format(as.Date(moosavi$Start_Time), "%Y-%m-%d")
+moosavi = moosavi %>% 
+  mutate(Precipitation.in. = ifelse(is.na(Precipitation.in.) == TRUE,0,Precipitation.in.))
+
+#creating weather df
+weather = moosavi %>% 
+  filter(year(date) == 2019) %>% 
+  group_by(date, County) %>% 
+  summarise(av_temp = mean(Temperature.F., na.rm = TRUE), av_visability = mean(Visibility.mi., na.rm = TRUE), av_wind_mph = mean(Wind_Speed.mph., na.rm =TRUE), av_wind_chill = mean(Wind_Chill.F., na.rm = TRUE), av_precip = mean(Precipitation.in.)) %>% 
+  as.data.frame()
+
+#making sure it can be merged
+weather$date = ymd(weather$date)
+weather$county = toupper(weather$County)
+weather = weather %>% 
+  select(-County)
+
+#getting counts
+acc_count = accidents %>% 
+  na.omit %>% 
+  group_by(county, date, weekday, season) %>%
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>% 
+  as.data.frame()
+
+acc_count$date = ymd(acc_count$date)
+
+#merging
+rf_data = right_join(weather, acc_count, by = c("date", "county"))
+
+#omit NAs
+rf_data = na.omit(rf_data)
+
+#cleaning population data
+county_pop = county_pop %>% 
+  filter(year == 2019) %>% 
+  select(-year)
+
+#making sure it can be merged by county
+county_pop$county = toupper(county_pop$county)
+
+
+#merging
+rf_data = left_join(rf_data, county_pop, by = "county")
+
+#getting event count per 100,000 people in the county
+rf_data$event_rate = (rf_data$count/rf_data$totalPopulation) * 100000
+
+rf_data$county = as.factor(rf_data$county)
+rf_data$season = as.factor(rf_data$season)
+
+#Dropping unneeded variables
+rf_clean = rf_data %>% 
+  select(-totalPopulation, -count, -date)
+
+rf_split = initial_split(rf_clean)
+rf_train = training(rf_split)
+rf_test = testing(rf_split)
+```
+\FloatBarrier
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+
+summary_table = rf_data %>% 
+  group_by(county) %>% 
+  summarise(Average_Events = mean(event_rate), Std_Dev = sd(event_rate)) %>% 
+  na.omit() %>% 
+  kable(caption = "Mean and Standard Deviation of Event Rates by County", col.names = c("County", "Mean", "Standard Deviation"), format.args = list(float = FALSE)) %>% 
+  kable_styling(c("bordered","condensed"),
+                latex_options = c("hold_position"))
+
+summary_table
+```
+\FloatBarrier
+```
+```
+```{r message=FALSE, warning=FALSE, echo=FALSE, include=FALSE}
+
+boost = gbm(event_rate ~ ., data = rf_train, interaction.depth = 10, n.trees = 1000, shrinkage = .01, cv.folds = 10)
+
+optimal_iter = function(boostie) {
+  df = data.frame(iteration = c(1:boostie$n.trees), cv_error = boostie$cv.error)
+  min = min(df$cv_error)
+  optimal = df$iteration[df$cv_error == min]
+  boostie = gbm(event_rate~., data = rf_train, interaction.depth = 10, n.trees= optimal, shrinkage = .01, cv.folds = 10, distribution = "gaussian")
+}
+
+boost = optimal_iter(boost)
+
+rmse(boost, rf_test)
+```
+
+Using this model we can make some predictions about new data.  Say, in Denver County, the average temperature for a particular Friday in the Fall is 10 degrees. We expect it to snow on average .1 inches across the county and the average wind speed is 20 mph. Our model predicts approximately 3.496 accidents per 100,000 people.  Considering the county's population of 710137, this equates to roughly 25 accidents in the county on that day.
+
+```{r message=FALSE, warning=FALSE, echo=FALSE, include = FALSE}
+
+new_vector = data.frame(av_temp = .1, av_visability = 10, av_wind_mph = 20, av_wind_chill = 0, av_precip = .1, county = "DENVER", weekday = "Friday", season = "Fall")
+
+predict(boost, newdata = new_vector)
+```
+
+## Conclusion
+
+Determinately, the models above give us mixed results when analyzing motor vehicle accidents in Colorado.  Our regularized logistical model showed weakness in determining the severity of car accidents.  The shape of our ROC curve suggests that our model have very little predictive power.  Moreover, a TPR of only 6% when classifying injury/fatality would not give first-responders a good gauge as to how severe an accident would be given particular characteristics.  However, the coefficients that the Lasso regularization process gave us could be useful in identifying key causes of harm.  Higher speeds were associated with greater injury risk.  Accidents that involved someone not in an enclosed vehicle (pedestrian, bicycle, or motorcycle) were associated with higher accident severity. Moreover, if the wreck was a head-on collision or if the vehicle rolled, risk of injury increased. The variable of driver illness may suggest that the driver's illness caused them to wreck, causing more injury to themselves and potentially others.  These could be factors that first-responders could use to anticipate greater aid for accidents of this type.
+```
+```
+When predicting the number of the number of accidents on a given day, our gradient boosted forests model seemed to preform well.  With an out-of-sample rmse score of approximately 1.48, many of our predictions were quite accurate.  This model tended to predict higher values in the Winter and Fall and when temperatures were low.  This is an intuitive result as road conditions tend to be worse during these times.  Additionally, higher values were associated with Fridays.  Weekdays, in general, had higher accidents than weekends, but perhaps Fridays are associated with greater instances of drunk driving or greater traffic flows due to travel for the weekend. Ultimately, this model has potential to be used in the future.  Given particular weather forecasts, a county may be able to predict how many accidents will happen within their boarders.  This could give policymakers insights as to how to make roads safer at particular times and where to allocate resources.
+```
+```
+Considering all of this, there is certainly room for expansion in this analysis. Different classification models could be engineered to provide a better result than the regularized model used in this study.  Perhaps better weather data could be gathered from state-run weather stations. Additionally, this analysis could be expanded to the national level.  It could be useful to see how state infrastructure spending impacts traffic accidents.  Ultimately, motor vehicle accidents are of key concern to those influencing policy, behooving them to study where they may occur and how severe they can be.
+
+## Resources
+Original Data Sets:
+
+https://www.kaggle.com/datasets/sobhanmoosavi/us-accidents
+
+https://www.codot.gov/safety/traffic-safety/data-analysis/crash-data
+
+https://data.colorado.gov/Demographics/Total-Population-by-County-by-Year-Line-Chart/nuaj-mcig
