@@ -5,8 +5,8 @@ date: "4/17/2022"
 output: 
   pdf_document:
     latex_engine: xelatex
-  header-includes:
-    - \usepackage{placeins}
+header-includes:
+   \usepackage{placeins}
 ---
 
 ## Abstract
