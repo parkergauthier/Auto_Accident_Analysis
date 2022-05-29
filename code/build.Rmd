@@ -3,10 +3,7 @@ title: "Colorado Car Accident Prediction: An Analysis of When and Where an Accid
 author: "Parker Gauthier"
 date: "4/17/2022"
 output: 
-  pdf_document:
-    latex_engine: xelatex
-header-includes:
-   \usepackage{placeins}
+  pdf_document: md_document
 ---
 
 ## Abstract
@@ -292,7 +289,6 @@ ROC + geom_abline(intercept = 0, slope = 1)
 ```
 ```
 ```
-\FloatBarrier
 ```{r message=FALSE, warning=FALSE, echo=FALSE}
 #confusion matrix
 results = table(Actual = harm_test$severity, Predictions = yhat)
@@ -311,11 +307,9 @@ colnames(con_frame) = c("Predicted No Injury", "Predicted Injury")
 
 row.names(con_frame) = c("Actual No Injury", "Actual Injury")
 
-con_frame %>% kable(caption = "Confusion Matrix", format.args = list(float = FALSE)) %>% 
-  kable_styling(c("bordered","condensed"),
-                latex_options = c("hold_position"))
+con_frame %>% kable(caption = "Confusion Matrix", format.args = list(float = FALSE))
 ```
-\FloatBarrier
+
 
 ```{r message=FALSE, warning=FALSE, echo=FALSE, include=FALSE}
 #Accuracy
@@ -328,7 +322,6 @@ results[1,2]/(results[1,2] + results[1,1])
 Despite our low TPR, it is interesting to note some of the coefficients that had high positive values from our regression.  Many of the top coefficients were associated with speed variables. Unsurprisingly, high speeds had higher rankings in our model. Outside of these, Table 2 shows some of the coefficients that had high positive impact on the classification of injury/fatality.   Anything with "mhe" as a prefix means this was the "most harmful event" in the accident. We can see that bicycle, pedestrian, and head-on collisions are ranked highly, as well as incidences where the vehicle overturned.  Additionally, the term "vehicles" signifies the number of vehicles involved in an accident.  Its ranking shows that with more vehicles involved, injury risk is higher.  The table also shows that if a motorcycle was involved in an accident, or if a driver was inebriated, the risk of injury was higher.  Finally, the driver factor of "illness" ranked higher than any other factor of this kind.
 ```
 ```
-\FloatBarrier
 ```{r message=FALSE, warning=FALSE, echo=FALSE}
 coef_tidy = broom::tidy(harm_lasso)
 
@@ -338,11 +331,9 @@ coef_tidy %>%
   select(term, estimate) %>% 
   filter(term == "mhePEDESTRIAN" | term == "mheBICYCLE" | term == "motorcycle1"| term == "impairment1" | term == "factor_1ILLNESS" | term == "vehicles" | term == "mheOVERTURNING" | term == "mheHEAD-ON") %>% 
   arrange(desc(estimate)) %>% 
-  kable(caption = "Notable Coefficients", format.args = list(float = FALSE)) %>% 
-  kable_styling(c("bordered","condensed"),
-                latex_options = c("hold_position"))
+  kable(caption = "Notable Coefficients", format.args = list(float = FALSE))
 ```
-\FloatBarrier
+
 ### Accident Count Predictions using Gradient Boosted Forests
 Our next model aims to predict the counts of motor vehicle accidents in each county given different weather conditions.  Also included in the model are variables for day of the week and the season.  Figure 3 depicts that weekdays have far more accidents than weekends, Friday being the day with the most accidents.  Moreover, Fall appears to have more accidents than any other season:
 ```
@@ -429,20 +420,18 @@ rf_split = initial_split(rf_clean)
 rf_train = training(rf_split)
 rf_test = testing(rf_split)
 ```
-\FloatBarrier
+
 ```{r message=FALSE, warning=FALSE, echo=FALSE}
 
 summary_table = rf_data %>% 
   group_by(county) %>% 
   summarise(Average_Events = mean(event_rate), Std_Dev = sd(event_rate)) %>% 
   na.omit() %>% 
-  kable(caption = "Mean and Standard Deviation of Event Rates by County", col.names = c("County", "Mean", "Standard Deviation"), format.args = list(float = FALSE)) %>% 
-  kable_styling(c("bordered","condensed"),
-                latex_options = c("hold_position"))
+  kable(caption = "Mean and Standard Deviation of Event Rates by County", col.names = c("County", "Mean", "Standard Deviation"), format.args = list(float = FALSE))
 
 summary_table
 ```
-\FloatBarrier
+
 ```
 ```
 ```{r message=FALSE, warning=FALSE, echo=FALSE, include=FALSE}
